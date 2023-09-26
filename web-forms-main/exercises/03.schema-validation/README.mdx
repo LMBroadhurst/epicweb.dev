@@ -1,0 +1,298 @@
+# Schema Validation
+
+It doesn't take long before you are really tired of writing code that looks like
+this:
+
+```tsx
+if (title === '') {
+	errors.fieldErrors.title.push('Title is required')
+}
+if (title.length > titleMaxLength) {
+	errors.fieldErrors.title.push('Title must be at most 100 characters')
+}
+if (content === '') {
+	errors.fieldErrors.content.push('Content is required')
+}
+if (content.length > contentMaxLength) {
+	errors.fieldErrors.content.push('Content must be at most 10000 characters')
+}
+```
+
+I'm afraid to say it gets worse.
+
+If you haven't felt the draw to write a utility to improve this yet, you will.
+For example, we could do something like this:
+
+```tsx
+function validate(value: string, max: number) {
+	const errors = []
+	if (value === '') {
+		errors.push('Required')
+	}
+	if (value.length > max) {
+		errors.push(`Must be at most ${max} characters`)
+	}
+	return errors
+}
+
+errors.fieldErrors.title.push(...validate(title, titleMaxLength))
+errors.fieldErrors.content.push(...validate(content, contentMaxLength))
+```
+
+Luckily, there are already libraries that do this for us so we don't have to
+trouble ourselves with writing our own validation. On top of this, they allow
+you to be much more declarative with your validation. The library we'll use
+looks like this:
+
+```tsx
+z.object({
+	title: z.string().max(titleMaxLength),
+	content: z.string().max(contentMaxLength),
+})
+```
+
+This is how you create your schema. And then you use that to perform the
+validation (parsing):
+
+```tsx
+const result = schema.safeParse({ title, content })
+
+if (result.success) {
+	// we're good, check result.data
+} else {
+	// we're not good, check result.error
+}
+```
+
+Schema validation is a great way to validate data due to its declarative nature.
+
+## Zod
+
+The library we're going to use is [Zod](https://zod.dev). Zod is a
+"TypeScript-first schema validation with static type inference" that allows you
+to define schemas for your data. A lot of the web ecosystem already uses it and
+it has great integrations with other libraries we'll want to use.
+
+And because it has fantastic TypeScript support, it allows us to have a lot more
+confidence in our code as the types flow through our application. It's a great
+way to manage I/O boundaries to your application like reading from the
+filesystem, making HTTP requests, and interacting with databases.
+
+Zod also allows for a great deal of customization and
+[refinement](https://zod.dev/?id=refine) in your validation and error messages.
+Here are some examples from [the Zod docs](https://zod.dev):
+
+```tsx
+z.string().max(5, { message: 'Must be 5 or fewer characters long' })
+
+// even type inference based on the schema:
+const A = z.string()
+type A = z.infer<typeof A> // string
+
+const name = z.string({
+	required_error: 'Name is required',
+	invalid_type_error: 'Name must be a string',
+})
+
+const user = z.object({
+	username: z.string().optional(),
+})
+
+const nonEmptyStrings = z.array(z.string()).nonempty({
+	message: "Can't be empty!",
+})
+```
+
+Zod is extremely powerful. I recommend you have the documentation open during
+these exercises for reference.
+
+## Conform
+
+One of the benefits to using a declarative interface for validation is that you
+can use that same schema to assist in the generation of that data–including for
+the forms users will fill out!
+
+While you most definitely _can_ generate the entire form based on the schema if
+you want to (I've done this
+[before](https://github.com/formly-js/angular-formly)), we're going to keep our
+UI flexibility and just use the schema to give us type safe data to create the
+props for our forms.
+
+You may not have thought about it, but often we duplicate our validation logic
+between our client and our server. We do it on the server because we have to and
+on the client because we want to give the user feedback as they're filling out
+the form (for a better UX).
+
+With Zod, we can use the same schema to validate the data on the client _and_
+the server. But then, that's just the JavaScript portion. What about the HTML
+attributes?
+
+If you have a schema like this:
+
+```tsx
+const FormSchema = z.object({
+	email: z.string().email(),
+})
+```
+
+Then you want the form to look like this:
+
+```html
+<form method="post">
+	<label for="email-input">Email</label>
+	<input id="email-input" type="email" required />
+</form>
+```
+
+And when there's an error, we also want to have the right aria attributes:
+
+```html
+<form method="post">
+	<label for="email-input">Email</label>
+	<input
+		id="email-input"
+		type="email"
+		aria-invalid="true"
+		aria-describedby="email-errors"
+		required
+	/>
+	<ul id="email-errors">
+		<li>Must be a valid email address</li>
+	</ul>
+</form>
+```
+
+Those attributes are very important (and very intentional). Without those
+attributes, the user doesn't get any client-side validation until the JavaScript
+finishes loading. Additionally, screen readers will reference these attributes
+in their assistance to the user. So these attributes are very important.
+
+Luckily, we can use the schema to generate these attributes for us. We'll use
+a library called [conform](https://conform.guide) to do this. Conform is "a
+progressive enhancement first form validation library for Remix and React
+Router."
+
+Progressive Enhancement is the idea that your application starts with a baseline
+functionality, and then you layer on additional functionality as the user's
+device and browser support it. Practically speaking, this means that our form
+will work before the JavaScript finishes loading (or even if it never does),
+and then we use the JavaScript to enhance the experience with better pending UI
+and faster transitions.
+
+Conform has an adapter for Zod schemas with utilities that are perfect for what
+we're looking for. Here's an example:
+
+```tsx
+import { conform, useForm } from '@conform-to/react'
+import { getFieldsetConstraint, parse } from '@conform-to/zod'
+import { Form } from '@remix-run/react'
+import { json, redirect } from '@remix-run/node'
+import { z } from 'zod'
+
+const LoginSchema = z.object({
+	email: z
+		.string({ required_error: 'Email is required' })
+		.email('Email is invalid'),
+	password: z.string({ required_error: 'Password is required' }),
+})
+
+export async function action({ request }: DataFunctionArgs) {
+	const formData = await request.formData()
+	const submission = parse(formData, {
+		schema: LoginSchema,
+	})
+
+	if (submission.intent !== 'submit') {
+		// the user hasn't submitted the form yet
+		// this will happen if Conform is validating the form before submission
+		// (like if we configure Conform to validate onBlur)
+		return json({ status: 'idle', submission } as const)
+	}
+
+	if (!submission.value) {
+		// there's no value because there is an error in the form
+		return json({ status: 'error', submission } as const, {
+			status: 400,
+		})
+	}
+
+	const { email, password } = submission.value
+
+	const isAuthenticated = await authenticate({ email, password })
+	if (!isAuthenticated) {
+		// set the form error:
+		submission.error[''] = ['Invalid email or password']
+		return json(
+			{
+				status: 'error',
+				submission,
+			} as const,
+			{
+				status: 401,
+			},
+		)
+	}
+
+	return redirect('/dashboard')
+}
+
+export default function LoginForm() {
+	const actionData = useActionData<typeof action>()
+	const [form, fields] = useForm({
+		id: 'login-form',
+		constraint: getFieldsetConstraint(LoginSchema),
+		lastSubmission: actionData?.submission,
+		onValidate({ formData }) {
+			return parse(formData, { schema: LoginSchema })
+		},
+	})
+
+	return (
+		<Form method="post" {...form.props}>
+			<div>
+				<label htmlFor={fields.email.id}>Email</label>
+				<input {...conform.input(fields.email)} />
+				<ErrorList id={fields.email.errorId} errors={fields.email.errors} />
+			</div>
+			<div>
+				<label htmlFor={fields.password.id}>Password</label>
+				<input
+					{...conform.input(fields.password, {
+						type: 'password',
+					})}
+				/>
+				<ErrorList
+					id={fields.password.errorId}
+					errors={fields.password.errors}
+				/>
+			</div>
+			<ErrorList id={fields.password.errorId} errors={form.errors} />
+			<button type="submit">Login</button>
+		</Form>
+	)
+}
+
+function ErrorList({
+	id,
+	errors,
+}: {
+	id?: string
+	errors?: Array<string> | null
+}) {
+	if (!errors) return null
+	errors = Array.isArray(errors) ? errors : [errors]
+
+	return errors.length ? (
+		<ul id={id} className="flex flex-col gap-1">
+			{errors.map((error, i) => (
+				<li key={i} className="text-foreground-danger text-[10px]">
+					{error}
+				</li>
+			))}
+		</ul>
+	) : null
+}
+```
+
+There's quite a bit in there, but we'll look through all of it piece by piece in
+the exercise.
